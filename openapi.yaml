@@ -1,0 +1,392 @@
+openapi: 3.1.0
+info:
+  title: OrderFlow API
+  version: 1.0.0
+  description: An order and inventory API with asynchronous reservation via Kafka.
+servers:
+  - url: http://127.0.0.1:8080
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: HTTP process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {const: ok}
+  /readyz:
+    get:
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: PostgreSQL and Redis are reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {const: ready}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/products:
+    get:
+      operationId: listProducts
+      tags: [Products]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - name: cursor
+          in: query
+          description: SKU from next_cursor on the previous page
+          schema: {$ref: '#/components/schemas/Sku'}
+      responses:
+        '200':
+          description: Page of products in ascending SKU order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Product'}
+                  next_cursor: {$ref: '#/components/schemas/Sku'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: createProduct
+      tags: [Products]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Product'}
+      responses:
+        '201':
+          description: Product created
+          headers:
+            Location:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Product'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/Unsupported'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/products/{sku}:
+    parameters:
+      - $ref: '#/components/parameters/Sku'
+    get:
+      operationId: getProduct
+      tags: [Products]
+      responses:
+        '200': {$ref: '#/components/responses/Product'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/products/{sku}/restock:
+    parameters:
+      - $ref: '#/components/parameters/Sku'
+    post:
+      operationId: restockProduct
+      tags: [Products]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [quantity]
+              properties:
+                quantity: {type: integer, minimum: 1, maximum: 1000000000}
+      responses:
+        '200': {$ref: '#/components/responses/Product'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/Unsupported'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/orders:
+    get:
+      operationId: listOrders
+      tags: [Orders]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - name: cursor
+          in: query
+          description: Order ID from next_cursor on the previous page
+          schema: {$ref: '#/components/schemas/Id'}
+      responses:
+        '200':
+          description: Page of order summaries in descending ID order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Order'}
+                  next_cursor: {$ref: '#/components/schemas/Id'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: placeOrder
+      tags: [Orders]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OrderInput'}
+            example:
+              customer: Alex
+              items: [{sku: KEYBOARD-01, quantity: 2}]
+      responses:
+        '200':
+          description: Idempotent replay returning the current state of the existing order
+          headers:
+            Location:
+              schema: {type: string}
+            Idempotency-Replayed:
+              schema: {const: 'true'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Order'}
+        '202':
+          description: Accepted for asynchronous reservation
+          headers:
+            Location:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Order'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/Unsupported'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      operationId: getOrder
+      tags: [Orders]
+      responses:
+        '200': {$ref: '#/components/responses/Order'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/orders/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      operationId: cancelOrder
+      tags: [Orders]
+      responses:
+        '200': {$ref: '#/components/responses/Order'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/orders/{id}/events:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      operationId: listOrderEvents
+      tags: [Orders]
+      responses:
+        '200':
+          description: Order events in ascending event ID order
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/OrderEvent'}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    Sku:
+      name: sku
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Sku'}
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Id'}
+  schemas:
+    Id: {type: integer, format: int64, minimum: 1}
+    Sku: {type: string, pattern: '^[A-Z0-9][A-Z0-9_-]{0,31}$'}
+    Price: {type: integer, format: int64, minimum: 1, maximum: 100000000}
+    Quantity: {type: integer, minimum: 1, maximum: 1000}
+    Status:
+      type: string
+      enum: [pending, confirmed, rejected, cancelled]
+    Product:
+      type: object
+      additionalProperties: false
+      required: [sku, name, price_cents]
+      properties:
+        sku: {$ref: '#/components/schemas/Sku'}
+        name: {type: string, minLength: 1, maxLength: 120, description: Maximum 120 UTF-8 bytes}
+        price_cents: {$ref: '#/components/schemas/Price'}
+        available: {type: integer, minimum: 0, maximum: 1000000000, default: 0}
+    OrderInput:
+      type: object
+      additionalProperties: false
+      required: [customer, items]
+      properties:
+        customer: {type: string, minLength: 1, maxLength: 120, description: Maximum 120 UTF-8 bytes}
+        items:
+          type: array
+          minItems: 1
+          maxItems: 25
+          description: Each SKU may occur once
+          items:
+            type: object
+            additionalProperties: false
+            required: [sku, quantity]
+            properties:
+              sku: {$ref: '#/components/schemas/Sku'}
+              quantity: {$ref: '#/components/schemas/Quantity'}
+    Order:
+      type: object
+      required: [id, customer, status, total_cents, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        customer: {type: string}
+        status: {$ref: '#/components/schemas/Status'}
+        reason: {type: string, examples: [insufficient_stock]}
+        total_cents: {type: integer, format: int64, minimum: 0}
+        items:
+          type: array
+          description: Included in order detail, creation and cancellation responses
+          items:
+            type: object
+            required: [sku, quantity, unit_price_cents]
+            properties:
+              sku: {$ref: '#/components/schemas/Sku'}
+              quantity: {$ref: '#/components/schemas/Quantity'}
+              unit_price_cents: {$ref: '#/components/schemas/Price'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    OrderEvent:
+      type: object
+      required: [id, order_id, type, status, occurred_at]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        order_id: {$ref: '#/components/schemas/Id'}
+        type:
+          type: string
+          enum: [order.placed, order.confirmed, order.rejected, order.cancelled]
+        status: {$ref: '#/components/schemas/Status'}
+        reason: {type: string}
+        occurred_at: {type: string, format: date-time}
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+  responses:
+    Product:
+      description: Product details
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Product'}
+    Order:
+      description: Order details
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Order'}
+    Invalid:
+      description: Invalid request or unknown SKU in an order
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Bearer token is missing or invalid
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: Duplicate SKU, mismatched idempotency payload, or invalid state change
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    TooLarge:
+      description: Request body exceeds 32 KiB
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unsupported:
+      description: JSON content type required
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    RateLimited:
+      description: Request limit exceeded
+      headers:
+        Retry-After:
+          schema: {type: integer, minimum: 1}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unavailable:
+      description: Dependency unavailable or request deadline exceeded
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}

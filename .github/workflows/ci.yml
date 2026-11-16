@@ -1,0 +1,37 @@
+name: OrderFlow CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_TOKEN: orderflow-demo-token
+      ORDERFLOW_URL: http://127.0.0.1:8080
+      RATE_LIMIT_PER_MINUTE: 1000
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal integration)"
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Start stack
+        run: docker compose --env-file .env.example up --build --wait --wait-timeout 150
+      - name: Test API and worker against the stack
+        run: go test -count=1 -tags=integration ./integration
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose --env-file .env.example logs --tail=80
+      - name: Stop stack
+        if: always()
+        run: docker compose --env-file .env.example down --volumes
